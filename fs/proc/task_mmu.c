@@ -1773,7 +1773,8 @@ static int pagemap_release(struct inode *inode, struct file *file)
 #define PM_SCAN_CATEGORIES	(PAGE_IS_WPALLOWED | PAGE_IS_WRITTEN |	\
 				 PAGE_IS_FILE |	PAGE_IS_PRESENT |	\
 				 PAGE_IS_SWAPPED | PAGE_IS_PFNZERO |	\
-				 PAGE_IS_HUGE | PAGE_IS_SOFT_DIRTY)
+				 PAGE_IS_HUGE | PAGE_IS_SOFT_DIRTY |    \
+				 PAGE_IS_MLOCKED)
 #define PM_SCAN_FLAGS		(PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC)
 
 struct pagemap_scan_private {
@@ -1791,7 +1792,7 @@ static unsigned long pagemap_page_category(struct pagemap_scan_private *p,
 	unsigned long categories = 0;
 
 	if (pte_present(pte)) {
-		struct page *page;
+		struct page *page = NULL;
 
 		categories |= PAGE_IS_PRESENT;
 		if (!pte_uffd_wp(pte))
@@ -1807,6 +1808,13 @@ static unsigned long pagemap_page_category(struct pagemap_scan_private *p,
 			categories |= PAGE_IS_PFNZERO;
 		if (pte_soft_dirty(pte))
 			categories |= PAGE_IS_SOFT_DIRTY;
+
+		if (p->masks_of_interest & PAGE_IS_MLOCKED) {
+			page = page ? : vm_normal_page(vma, addr, pte);
+			if (page && PageMlocked(page)) {
+				categories |= PAGE_IS_MLOCKED;
+			}
+		}
 	} else if (is_swap_pte(pte)) {
 		swp_entry_t swp;
 
@@ -1853,7 +1861,7 @@ static unsigned long pagemap_thp_category(struct pagemap_scan_private *p,
 	unsigned long categories = PAGE_IS_HUGE;
 
 	if (pmd_present(pmd)) {
-		struct page *page;
+		struct page *page = NULL;
 
 		categories |= PAGE_IS_PRESENT;
 		if (!pmd_uffd_wp(pmd))
@@ -1869,6 +1877,12 @@ static unsigned long pagemap_thp_category(struct pagemap_scan_private *p,
 			categories |= PAGE_IS_PFNZERO;
 		if (pmd_soft_dirty(pmd))
 			categories |= PAGE_IS_SOFT_DIRTY;
+		if (p->masks_of_interest & PAGE_IS_MLOCKED) {
+			page = page ? : vm_normal_page_pmd(vma, addr, pmd);
+			if (page && PageMlocked(page)) {
+				categories |= PAGE_IS_MLOCKED;
+			}
+		}
 	} else if (is_swap_pmd(pmd)) {
 		swp_entry_t swp;
 
@@ -1916,15 +1930,19 @@ static unsigned long pagemap_hugetlb_category(pte_t pte)
 	 * swapped pages.
 	 */
 	if (pte_present(pte)) {
+		struct page *page = pte_page(pte);
+
 		categories |= PAGE_IS_PRESENT;
 		if (!huge_pte_uffd_wp(pte))
 			categories |= PAGE_IS_WRITTEN;
-		if (!PageAnon(pte_page(pte)))
+		if (!PageAnon(page))
 			categories |= PAGE_IS_FILE;
 		if (is_zero_pfn(pte_pfn(pte)))
 			categories |= PAGE_IS_PFNZERO;
 		if (pte_soft_dirty(pte))
 			categories |= PAGE_IS_SOFT_DIRTY;
+		if (PageMlocked(page))
+			categories |= PAGE_IS_MLOCKED;
 	} else if (is_swap_pte(pte)) {
 		categories |= PAGE_IS_SWAPPED;
 		if (!pte_swp_uffd_wp_any(pte))
@@ -2031,6 +2049,8 @@ static int pagemap_scan_test_walk(unsigned long start, unsigned long end,
 
 	if (vma->vm_flags & VM_SOFTDIRTY)
 		vma_category |= PAGE_IS_SOFT_DIRTY;
+	if (vma->vm_flags & VM_LOCKED_MASK)
+		vma_category |= PAGE_IS_MLOCKED;
 
 	if (!pagemap_scan_is_interesting_vma(vma_category, p))
 		return 1;
